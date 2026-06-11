@@ -12,7 +12,7 @@ matplotlib.use('Agg') # Fix for Streamlit/Matplotlib GUI errors
 import matplotlib.pyplot as plt
 
 # Set page config at the top level to avoid errors and define layout
-st.set_page_config(page_title="Quant Scalper 5m", layout="wide")
+st.set_page_config(page_title="Quant Scalper 1h", layout="wide")
 
 @st.cache_data
 def fetch_fear_and_greed_history():
@@ -33,7 +33,7 @@ def fetch_fear_and_greed_history():
         return None
 
 @st.cache_data(ttl=300)
-def fetch_and_analyze(symbol='BTC/USDT', timeframe='5m', start_date=None, end_date=None, silent=False):
+def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_date=None, silent=False):
     """
     Fetches Crypto Data (via ccxt/Binance) and calculates Multi-Strategy Factors.
     """
@@ -52,13 +52,13 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='5m', start_date=None, end_da
         if symbol in ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM']:
             # Fetch Stock Data via yfinance
             print(f"Fetching data for {symbol} via yfinance...")
-            yf_interval = timeframe  # '5m', '1d' match yfinance usually
+            yf_interval = timeframe  # '1h', '1d' match yfinance usually
             
             if start_date:
                 df = yf.download(symbol, start=start_date, interval=yf_interval, progress=False, prepost=True)
             else:
-                # Live mode - last 5 days for 5m to get enough candles for indicators
-                period = '5d' if timeframe == '5m' else '2y'
+                # Live mode - last 60 days for 1h to get enough candles for indicators
+                period = '60d' if timeframe == '1h' else '2y'
                 df = yf.download(symbol, period=period, interval=yf_interval, progress=False, prepost=True)
             
             # Flatten MultiIndex columns (yfinance v0.2+)
@@ -218,10 +218,10 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='5m', start_date=None, end_da
         df['last_bear_fvg_bottom'] = df['last_bear_fvg_bottom'].fillna(10000000)
 
         # --- STRATEGY 11: Rising Momentum & Volume (User Request) ---
-        # 1-Hour Volume (Assuming 5m candles, 1h = 12 periods)
-        # We check if the total volume traded in the last hour is increasing
-        df['vol_1h'] = df['volume'].rolling(window=12).sum()
-        df['vol_1h_prev'] = df['vol_1h'].shift(1)
+        # 12-Hour Volume (Assuming 1h candles, 12h = 12 periods)
+        # We check if the total volume traded in the last 12 hours is increasing
+        df['vol_12h'] = df['volume'].rolling(window=12).sum()
+        df['vol_12h_prev'] = df['vol_12h'].shift(1)
         df['momentum_prev'] = df['momentum'].shift(1)
         
         return df
@@ -255,8 +255,8 @@ def generate_signal(df, symbol, start_hour=0, end_hour=24):
     volume = current['volume']
     vol_ma = current['vol_ma']
     adx = current['adx']
-    vol_1h = current.get('vol_1h', 0)
-    vol_1h_prev = current.get('vol_1h_prev', 0)
+    vol_12h = current.get('vol_12h', 0)
+    vol_12h_prev = current.get('vol_12h_prev', 0)
     momentum_prev = current.get('momentum_prev', 0)
     
     # FVG Zones
@@ -360,18 +360,18 @@ def generate_signal(df, symbol, start_hour=0, end_hour=24):
         reasons.append("In Bearish FVG Zone (Sell Zone)")
         
     # 11. Rising Momentum & Volume (Dominant Factor)
-    # "Mainly based on rising momentum and rising 1-hour volume"
-    volume_rising = vol_1h > vol_1h_prev
+    # "Mainly based on rising momentum and rising 12-hour volume"
+    volume_rising = vol_12h > vol_12h_prev
     
     if volume_rising:
         # Bullish: Positive Momentum that is getting stronger
         if momentum > 0 and momentum > momentum_prev:
             score += 2.5
-            reasons.append("Rising Mom & 1H Vol (Strong Buy)")
+            reasons.append("Rising Mom & 12H Vol (Strong Buy)")
         # Bearish: Negative Momentum that is getting stronger (falling price speeding up)
         elif momentum < 0 and momentum < momentum_prev:
             score -= 2.5
-            reasons.append("Rising Bearish Mom & 1H Vol (Strong Sell)")
+            reasons.append("Rising Bearish Mom & 12H Vol (Strong Sell)")
 
     # --- Prediction Logic ---
     signal = "NEUTRAL"
@@ -502,8 +502,8 @@ def backtest_strategy(df, symbol, start_hour=0, end_hour=24, rsi_lower=30, rsi_u
         volume = current['volume']
         vol_ma = current['vol_ma']
         adx = current['adx']
-        vol_1h = current.get('vol_1h', 0)
-        vol_1h_prev = current.get('vol_1h_prev', 0)
+        vol_12h = current.get('vol_12h', 0)
+        vol_12h_prev = current.get('vol_12h_prev', 0)
         momentum_prev = current.get('momentum_prev', 0)
         
         # FVG
@@ -553,7 +553,7 @@ def backtest_strategy(df, symbol, start_hour=0, end_hour=24, rsi_lower=30, rsi_u
         elif in_bear_fvg: score -= 2.0
         
         # 11. Rising Momentum & Volume (Dominant Factor)
-        volume_rising = vol_1h > vol_1h_prev
+        volume_rising = vol_12h > vol_12h_prev
         if volume_rising:
             if momentum > 0 and momentum > momentum_prev:
                 score += 2.5
@@ -684,19 +684,19 @@ def scan_and_rank_crypto():
     total_tickers = len(tickers)
     
     def process_ticker(sym):
-        df = fetch_and_analyze(sym, timeframe='5m', silent=True)
+        df = fetch_and_analyze(sym, timeframe='1h', silent=True)
         if df is not None and not df.empty:
             mom = df['momentum'].iloc[-1]
             price = df['close'].iloc[-1]
             fr = funding_rates.get(sym, 0.0)
             vol_24h = futures_24h_vol.get(sym, 0.0)
             
-            vol_1h = 0.0
+            vol_12h = 0.0
             if sym in swap_sym_map:
                 try:
-                    ohlcv_5m = exchange_swap.fetch_ohlcv(swap_sym_map[sym], timeframe='5m', limit=12)
-                    if ohlcv_5m:
-                        vol_1h = sum(c[5] * c[4] for c in ohlcv_5m)
+                    ohlcv_1h = exchange_swap.fetch_ohlcv(swap_sym_map[sym], timeframe='1h', limit=12)
+                    if ohlcv_1h:
+                        vol_12h = sum(c[5] * c[4] for c in ohlcv_1h)
                 except Exception:
                     pass
                     
@@ -714,10 +714,10 @@ def scan_and_rank_crypto():
                 'price': price, 
                 'funding_rate': fr, 
                 'notional_oi': notional_oi,
-                'futures_1h_vol': vol_1h,
+                'futures_12h_vol': vol_12h,
                 'futures_24h_vol': vol_24h,
-                '1h_trend': trend, 
-                '5m_volume': vol_profile
+                '12h_trend': trend, 
+                '1h_volume': vol_profile
             }
         return None
 
@@ -786,7 +786,7 @@ def format_large_number(x):
         return "$0"
 
 def main():
-    st.title("Quantitative Scalping Dashboard (5m) 📈")
+    st.title("Quantitative Scalping Dashboard (1h) 📈")
     
     # Sidebar
     if st.sidebar.button("🔄 Force Data Refresh"):
@@ -806,8 +806,8 @@ def main():
         'SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM'
     ]
     symbol = st.sidebar.selectbox("Ticker Symbol", options=asset_options)
-    # Default backtest to 7 days for 5m timeframe to avoid huge data loads
-    backtest_start = st.sidebar.date_input("Backtest Start", value=datetime.now() - timedelta(days=7))
+    # Default backtest to 30 days for 1h timeframe to avoid huge data loads
+    backtest_start = st.sidebar.date_input("Backtest Start", value=datetime.now() - timedelta(days=30))
     
     st.sidebar.header("Strategy Settings")
     
@@ -863,7 +863,7 @@ def main():
                     "price": "${:.2f}", 
                     "funding_rate": "{:.4%}",
                     "notional_oi": format_large_number,
-                    "futures_1h_vol": format_large_number,
+                    "futures_12h_vol": format_large_number,
                     "futures_24h_vol": format_large_number
                 })
                 
@@ -872,7 +872,7 @@ def main():
                 else:
                     styler = styler.applymap(color_metrics, subset=['momentum', 'funding_rate'])
                     
-                styler = styler.background_gradient(subset=['futures_1h_vol', 'futures_24h_vol'], cmap='Blues')
+                styler = styler.background_gradient(subset=['futures_12h_vol', 'futures_24h_vol'], cmap='Blues')
 
                 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 st.dataframe(
@@ -882,19 +882,19 @@ def main():
                             "Open Interest", 
                             help="Notional Open Interest (USDT)"
                         ),
-                        "futures_1h_vol": st.column_config.Column(
-                            "1H Futures Vol", 
-                            help="Rolling 1-Hour Futures Trading Volume (USDT)"
+                        "futures_12h_vol": st.column_config.Column(
+                            "12H Futures Vol", 
+                            help="Rolling 12-Hour Futures Trading Volume (USDT)"
                         ),
                         "futures_24h_vol": st.column_config.Column(
                             "24H Futures Vol", 
                             help="24-Hour Futures Trading Volume (USDT)"
                         ),
-                        "1h_trend": st.column_config.LineChartColumn(
-                            "1H Trend", help="Price movement over the last 60 minutes"
+                        "12h_trend": st.column_config.LineChartColumn(
+                            "12H Trend", help="Price movement over the last 12 hours"
                         ),
-                        "5m_volume": st.column_config.BarChartColumn(
-                            "5m Volume Profile", help="5-minute volume bars over the last 60 minutes"
+                        "1h_volume": st.column_config.BarChartColumn(
+                            "1h Volume Profile", help="1-hour volume bars over the last 12 hours"
                         )
                     }
                 )
@@ -906,41 +906,41 @@ def main():
                 else:
                     st.experimental_rerun()
                         
-        # --- 1-HOUR MICRO-MOMENTUM BREAKDOWN ---
+        # --- 12-HOUR MICRO-MOMENTUM BREAKDOWN ---
         st.divider()
-        st.subheader("🔍 1-Hour Micro-Momentum Breakdown")
-        st.write("Breaks down the past 1 hour into 5-minute returns to spot building bullish or bearish pressure.")
+        st.subheader("🔍 12-Hour Micro-Momentum Breakdown")
+        st.write("Breaks down the past 12 hours into 1-hour returns to spot building bullish or bearish pressure.")
         
         micro_options = st.session_state.get('scanned_tickers', asset_options)
         micro_idx = micro_options.index(symbol) if symbol in micro_options else 0
         micro_sym = st.selectbox("Select Asset to Analyze", options=micro_options, index=micro_idx, key='micro_sym')
         
-        micro_df = fetch_and_analyze(micro_sym, timeframe='5m', silent=True)
+        micro_df = fetch_and_analyze(micro_sym, timeframe='1h', silent=True)
         if micro_df is not None and len(micro_df) >= 13:
-            # Calculate 5m returns before slicing so the first candle has a valid return
-            micro_df['5m_return'] = micro_df['close'].pct_change() * 100
-            last_1h = micro_df.tail(12).copy()
+            # Calculate 1h returns before slicing so the first candle has a valid return
+            micro_df['1h_return'] = micro_df['close'].pct_change() * 100
+            last_12h = micro_df.tail(12).copy()
             
             # Format index for better chart display (e.g., just the time '14:35')
-            last_1h.index = last_1h.index.strftime('%H:%M')
+            last_12h.index = last_12h.index.strftime('%H:%M')
             
-            # Plotting bar chart of 5m returns
-            st.bar_chart(last_1h['5m_return'])
+            # Plotting bar chart of 1h returns
+            st.bar_chart(last_12h['1h_return'])
             
             # Summary metrics
-            bullish_candles = (last_1h['5m_return'] > 0).sum()
-            bearish_candles = (last_1h['5m_return'] < 0).sum()
-            net_1h_return = ((micro_df['close'].iloc[-1] - micro_df['close'].iloc[-13]) / micro_df['close'].iloc[-13]) * 100
+            bullish_candles = (last_12h['1h_return'] > 0).sum()
+            bearish_candles = (last_12h['1h_return'] < 0).sum()
+            net_12h_return = ((micro_df['close'].iloc[-1] - micro_df['close'].iloc[-13]) / micro_df['close'].iloc[-13]) * 100
             
             c1, c2, c3 = st.columns(3)
-            c1.metric("Net 1H Price Change", f"{net_1h_return:.2f}%")
-            c2.metric("Bullish 5m Candles", int(bullish_candles))
-            c3.metric("Bearish 5m Candles", int(bearish_candles))
+            c1.metric("Net 12H Price Change", f"{net_12h_return:.2f}%")
+            c2.metric("Bullish 1h Candles", int(bullish_candles))
+            c3.metric("Bearish 1h Candles", int(bearish_candles))
             
             # Momentum Verdict
-            if net_1h_return > 0 and bullish_candles > bearish_candles:
+            if net_12h_return > 0 and bullish_candles > bearish_candles:
                 st.success(f"**Verdict:** Momentum is steadily building **BULLISH** 📈")
-            elif net_1h_return < 0 and bearish_candles > bullish_candles:
+            elif net_12h_return < 0 and bearish_candles > bullish_candles:
                 st.error(f"**Verdict:** Momentum is steadily building **BEARISH** 📉")
             else:
                 st.warning(f"**Verdict:** Momentum is currently **MIXED / CONSOLIDATING** ⚖️")
@@ -1008,11 +1008,11 @@ def main():
         if st.button("Refresh Indices Data"):
             with st.spinner("Fetching US Indices..."):
                 for sym in indices:
-                    df_idx = fetch_and_analyze(sym, timeframe='5m', silent=True)
+                    df_idx = fetch_and_analyze(sym, timeframe='1h', silent=True)
                     if df_idx is not None and not df_idx.empty:
                         current = df_idx.iloc[-1]
-                        # Estimate daily volume (last 78 5-minute bars = 6.5 trading hours)
-                        est_vol = df_idx['volume'].tail(78).sum()
+                        # Estimate daily volume (last 7 1-hour bars = 7 trading hours)
+                        est_vol = df_idx['volume'].tail(7).sum()
                         
                         index_stats.append({
                             "Symbol": sym,
@@ -1057,10 +1057,10 @@ def main():
                 valid_stocks = 0
                 
                 for sym in top_stocks:
-                    df_stock = fetch_and_analyze(sym, timeframe='5m', silent=True)
+                    df_stock = fetch_and_analyze(sym, timeframe='1h', silent=True)
                     if df_stock is not None and not df_stock.empty:
                         current = df_stock.iloc[-1]
-                        est_vol = df_stock['volume'].tail(78).sum()
+                        est_vol = df_stock['volume'].tail(7).sum()
                         
                         is_bullish = current['close'] > current['ema_50']
                         if is_bullish: bullish_trends += 1
