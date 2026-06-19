@@ -52,13 +52,21 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
         if symbol in ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM']:
             # Fetch Stock Data via yfinance
             print(f"Fetching data for {symbol} via yfinance...")
-            yf_interval = timeframe  # '1h', '1d' match yfinance usually
-            
+            # yfinance uses minute-based intervals for intraday data; map/hourly intervals where needed
+            yf_interval = timeframe
+            if timeframe == '1h':
+                yf_interval = '60m'
+            # For 4-hour, fetch 60m data then resample to 4H below
+            if timeframe == '4h':
+                yf_interval = '60m'
+
+            # Choose period: intraday intervals are limited to ~60 days of history
+            intraday_intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '4h']
+
             if start_date:
                 df = yf.download(symbol, start=start_date, interval=yf_interval, progress=False, prepost=True)
             else:
-                # Live mode - last 60 days for 1h to get enough candles for indicators
-                period = '60d' if timeframe == '1h' else '2y'
+                period = '60d' if timeframe in intraday_intervals else '2y'
                 df = yf.download(symbol, period=period, interval=yf_interval, progress=False, prepost=True)
             
             # Flatten MultiIndex columns (yfinance v0.2+)
@@ -72,6 +80,15 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
             # Strip timezone to avoid merge_asof crashes with Fear & Greed data
             if df.index.tz is not None:
                 df.index = df.index.tz_convert('UTC').tz_localize(None)
+            # If we fetched 60m data but the user requested 4h, resample to 4H candles
+            if timeframe == '4h' and not df.empty:
+                df = df.resample('4H').agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna()
             
         else:
             # Fetch Crypto Data via Binance (CCXT)
@@ -735,6 +752,94 @@ def scan_and_rank_crypto():
     
     return pd.DataFrame(stats)
 
+@st.cache_data(ttl=300)
+def scan_top_derivative_assets(timeframe='1h', top_n=30):
+    exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+    try:
+        tickers = exchange.fetch_tickers()
+    except Exception as e:
+        st.error(f"Could not fetch derivative tickers: {e}")
+        return pd.DataFrame()
+
+    swap_pairs = []
+    for pair, data in tickers.items():
+        if not data.get('active', True):
+            continue
+        if pair.endswith(':USDT') or pair.endswith('/USDT'):
+            if data.get('quoteVolume') is not None:
+                swap_pairs.append((pair, data))
+
+    if not swap_pairs:
+        return pd.DataFrame()
+
+    swap_pairs.sort(key=lambda x: x[1].get('quoteVolume', 0), reverse=True)
+    swap_pairs = swap_pairs[:top_n]
+
+    funding_rates = {}
+    try:
+        fr_data = exchange.fetch_funding_rates()
+        for sym, d in fr_data.items():
+            base_sym = sym.split(':')[0]
+            funding_rates[base_sym] = d.get('fundingRate', 0.0)
+    except Exception:
+        pass
+
+    stats = []
+    progress_bar = st.progress(0)
+
+    def process_pair(pair_data):
+        full_symbol, ticker = pair_data
+        base_symbol = full_symbol.split(':')[0]
+        try:
+            ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=timeframe, limit=100)
+            if not ohlcv:
+                return None
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df['open'] = pd.to_numeric(df['open'], errors='coerce')
+            df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+            
+            df['momentum'] = df['close'].pct_change(periods=1)
+            df['ma20'] = df['close'].rolling(window=20).mean()
+            df['std20'] = df['close'].rolling(window=20).std()
+            df['z_score'] = (df['close'] - df['ma20']) / df['std20']
+            
+            # Calculate inflow and outflow based on volume
+            df['is_up'] = df['close'] >= df['open']
+            inflow = df.loc[df['is_up'], 'volume'].sum()
+            outflow = df.loc[~df['is_up'], 'volume'].sum()
+            net_flow = inflow - outflow
+            
+            current = df.iloc[-1]
+
+            return {
+                'symbol': base_symbol,
+                'price': current['close'],
+                'momentum': current['momentum'],
+                'z_score': current['z_score'],
+                'funding_rate': funding_rates.get(base_symbol, ticker.get('fundingRate', 0.0)),
+                'open_interest': ticker.get('openInterest', 0.0),
+                '24h_volume': ticker.get('quoteVolume', 0.0),
+                'inflow': inflow,
+                'outflow': outflow,
+                'net_flow': net_flow
+            }
+        except Exception:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(process_pair, pair_data) for pair_data in swap_pairs]
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            result = future.result()
+            if result:
+                stats.append(result)
+            progress_bar.progress((i + 1) / len(swap_pairs))
+
+    stats.sort(key=lambda x: x['momentum'] if x['momentum'] is not None else -999, reverse=True)
+    return pd.DataFrame(stats)
+
+
 def optimize_parameters(df, symbol, active_hours):
     """
     Runs a Grid Search to find the best RSI parameters.
@@ -824,7 +929,7 @@ def main():
     tg_chat_id = st.sidebar.text_input("Telegram Chat ID")
 
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Market Overview", "⚡ Top Crypto Ranking", "🛠️ Backtest Engine", "🏛️ US Indices"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Market Overview", "⚡ Top Crypto Ranking", "🔥 Derivatives Trend Scan", "🛠️ Backtest Engine", "🏛️ US Indices"])
 
     with tab1:
         st.subheader(f"Live Analysis: {symbol}")
@@ -905,7 +1010,7 @@ def main():
                     st.rerun()
                 else:
                     st.experimental_rerun()
-                        
+
         # --- 12-HOUR MICRO-MOMENTUM BREAKDOWN ---
         st.divider()
         st.subheader("🔍 12-Hour Micro-Momentum Breakdown")
@@ -946,6 +1051,39 @@ def main():
                 st.warning(f"**Verdict:** Momentum is currently **MIXED / CONSOLIDATING** ⚖️")
 
     with tab3:
+        st.subheader("Top Derivatives Trend Scan")
+        st.write("Scan the top Binance USDT perpetual contract derivatives and compare momentum with Z-score.")
+        timeframe_deriv = st.selectbox("Select timeframe", ["5m", "15m", "1h", "4h"], index=2)
+
+        if st.button("Scan Top Derivatives"):
+            with st.spinner("Scanning top derivative assets..."):
+                df_deriv = scan_top_derivative_assets(timeframe=timeframe_deriv, top_n=100)
+                if df_deriv is not None and not df_deriv.empty:
+                    df_deriv['momentum'] = df_deriv['momentum'].fillna(0)
+                    df_deriv['z_score'] = df_deriv['z_score'].fillna(0)
+                    df_deriv['inflow'] = df_deriv['inflow'].fillna(0)
+                    df_deriv['outflow'] = df_deriv['outflow'].fillna(0)
+                    df_deriv['net_flow'] = df_deriv['net_flow'].fillna(0)
+                    styler = df_deriv.style.format({
+                        "price": "${:.2f}",
+                        "momentum": "{:.2%}",
+                        "z_score": "{:.2f}",
+                        "funding_rate": "{:.4%}",
+                        "open_interest": format_large_number,
+                        "24h_volume": format_large_number,
+                        "inflow": format_large_number,
+                        "outflow": format_large_number,
+                        "net_flow": format_large_number
+                    })
+                    if hasattr(styler, 'map'):
+                        styler = styler.map(color_metrics, subset=['momentum', 'z_score', 'net_flow'])
+                    else:
+                        styler = styler.applymap(color_metrics, subset=['momentum', 'z_score', 'net_flow'])
+                    st.dataframe(styler, use_container_width=True)
+                else:
+                    st.warning("No derivative asset data returned. Try again in a moment.")
+
+    with tab4:
         st.subheader(f"Strategy Backtest: {symbol}")
         if st.button("Run Backtest"):
             df = fetch_and_analyze(symbol, start_date=backtest_start.strftime('%Y-%m-%d'))
@@ -998,9 +1136,11 @@ def main():
                         
                     st.dataframe(styler)
 
-    with tab4:
+    with tab5:
         st.subheader("🏛️ Top US Indices & VIX Overview")
         st.write("Tracking S&P 500 (SPY), Nasdaq 100 (QQQ), Dow Jones (DIA), Volatility Index (^VIX), and US Dollar Index (DX-Y.NYB).")
+        # Timeframe selector for indices/stocks (15m, 1h, 4h)
+        timeframe = st.selectbox("Select timeframe", ["15m", "1h", "4h"], index=1)
         
         indices = ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB']
         index_stats = []
@@ -1008,7 +1148,7 @@ def main():
         if st.button("Refresh Indices Data"):
             with st.spinner("Fetching US Indices..."):
                 for sym in indices:
-                    df_idx = fetch_and_analyze(sym, timeframe='1h', silent=True)
+                    df_idx = fetch_and_analyze(sym, timeframe=timeframe, silent=True)
                     if df_idx is not None and not df_idx.empty:
                         current = df_idx.iloc[-1]
                         # Estimate daily volume (last 7 1-hour bars = 7 trading hours)
@@ -1057,7 +1197,7 @@ def main():
                 valid_stocks = 0
                 
                 for sym in top_stocks:
-                    df_stock = fetch_and_analyze(sym, timeframe='1h', silent=True)
+                    df_stock = fetch_and_analyze(sym, timeframe=timeframe, silent=True)
                     if df_stock is not None and not df_stock.empty:
                         current = df_stock.iloc[-1]
                         est_vol = df_stock['volume'].tail(7).sum()
