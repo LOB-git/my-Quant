@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg') # Fix for Streamlit/Matplotlib GUI errors
 import matplotlib.pyplot as plt
+import streamlit.components.v1 as components
 
 # Set page config at the top level to avoid errors and define layout
 st.set_page_config(page_title="Quant Scalper 1h", layout="wide")
@@ -38,18 +39,19 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
     Fetches Crypto Data (via ccxt/Binance) and calculates Multi-Strategy Factors.
     """
     try:
+        stock_index_symbols = ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM']
+        is_stock_index = symbol in stock_index_symbols
+
         # Handle Symbol Formatting (e.g., BTC-USD -> BTC/USDT for Binance)
-        if symbol.endswith('-USD'):
+        if not is_stock_index and symbol.endswith('-USD'):
             symbol = symbol.replace('-USD', '/USDT')
-        elif '-' in symbol:
+        elif not is_stock_index and '-' in symbol:
             symbol = symbol.replace('-', '/')
-        
-        print(f"Fetching data for {symbol} via Binance...")
         
         df = pd.DataFrame()
         
         # Check if symbol is a Stock/ETF to fetch via yfinance
-        if symbol in ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM']:
+        if is_stock_index:
             # Fetch Stock Data via yfinance
             print(f"Fetching data for {symbol} via yfinance...")
             # yfinance uses minute-based intervals for intraday data; map/hourly intervals where needed
@@ -64,10 +66,20 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
             intraday_intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '4h']
 
             if start_date:
-                df = yf.download(symbol, start=start_date, interval=yf_interval, progress=False, prepost=True)
+                try:
+                    df = yf.download(symbol, start=start_date, interval=yf_interval, progress=False, prepost=True)
+                except Exception:
+                    df = pd.DataFrame()
+                if df.empty:
+                    df = yf.Ticker(symbol).history(start=start_date, interval=yf_interval, prepost=True)
             else:
                 period = '60d' if timeframe in intraday_intervals else '2y'
-                df = yf.download(symbol, period=period, interval=yf_interval, progress=False, prepost=True)
+                try:
+                    df = yf.download(symbol, period=period, interval=yf_interval, progress=False, prepost=True)
+                except Exception:
+                    df = pd.DataFrame()
+                if df.empty:
+                    df = yf.Ticker(symbol).history(period=period, interval=yf_interval, prepost=True)
             
             # Flatten MultiIndex columns (yfinance v0.2+)
             if isinstance(df.columns, pd.MultiIndex):
@@ -92,6 +104,7 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
             
         else:
             # Fetch Crypto Data via Binance (CCXT)
+            print(f"Fetching data for {symbol} via Binance...")
             exchange = ccxt.binance({'enableRateLimit': True})
             limit = 1000 # Binance API limit per request
             all_ohlcv = []
@@ -641,6 +654,163 @@ def backtest_strategy(df, symbol, start_hour=0, end_hour=24, rsi_lower=30, rsi_u
         "history": trade_history
     }
 
+def backtest_composite_derivative(symbol, timeframe='1h', flow_timeframe=None, start_date=None, end_date=None, lookback_days=30):
+    """
+    Backtests composite derivative entry/exit signals on historical OHLCV data.
+    Uses all derivative strategies: MACD, ATR, MA20, money flow, volume ratio.
+    Supports date range or lookback period.
+    """
+    if flow_timeframe is None:
+        flow_timeframe = timeframe
+    
+    try:
+        exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+        
+        # Determine limit based on timeframe and lookback period
+        timeframe_minutes = {'5m': 5, '15m': 15, '1h': 60, '4h': 240}
+        minutes = timeframe_minutes.get(timeframe, 60)
+        limit = max(300, int((lookback_days * 24 * 60) / minutes) + 50)
+        
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=min(limit, 1000))
+        
+        if not ohlcv:
+            return None
+            
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df['open'] = pd.to_numeric(df['open'], errors='coerce')
+        df['high'] = pd.to_numeric(df['high'], errors='coerce')
+        df['low'] = pd.to_numeric(df['low'], errors='coerce')
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+        
+        # Filter by date range if provided
+        if start_date:
+            df = df[df['timestamp'] >= start_date]
+        if end_date:
+            df = df[df['timestamp'] <= end_date]
+        
+        if len(df) < 60:
+            st.error("Not enough data in selected date range.")
+            return None
+        
+        # Calculate all indicators
+        df['ma20'] = df['close'].rolling(window=20).mean()
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        df['macd_hist'] = macd - signal
+        
+        prev_close = df['close'].shift(1)
+        tr1 = df['high'] - df['low']
+        tr2 = (df['high'] - prev_close).abs()
+        tr3 = (df['low'] - prev_close).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        df['atr14'] = tr.rolling(window=14).mean()
+        
+        # RSI (14)
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / (loss + 1e-9)
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # Money flow signal
+        df['is_up'] = df['close'] >= df['open']
+        df['money_flow_vol'] = df.loc[df['is_up'], 'volume'].rolling(window=14).sum()
+        df['money_flow_vol'] = df['money_flow_vol'].fillna(0)
+        df['counter_flow_vol'] = df.loc[~df['is_up'], 'volume'].rolling(window=14).sum()
+        df['counter_flow_vol'] = df['counter_flow_vol'].fillna(0)
+        df['net_flow'] = df['money_flow_vol'] - df['counter_flow_vol']
+        df['total_flow'] = df['money_flow_vol'] + df['counter_flow_vol']
+        df['money_flow_signal'] = df['net_flow'] / (df['total_flow'] + 1e-9)
+        
+        # Volume ratio
+        df['vol_ma20'] = df['volume'].rolling(window=20).mean()
+        df['vol_ratio'] = df['volume'] / (df['vol_ma20'] + 1e-9)
+        
+        # Generate signals
+        initial_balance = 10000
+        balance = initial_balance
+        position = None
+        entry_price = 0
+        entry_date = None
+        trades = []
+        trade_history = []
+        peak_balance = initial_balance
+        max_drawdown = 0
+        
+        for i in range(50, len(df) - 1):
+            current = df.iloc[i]
+            next_row = df.iloc[i + 1]
+            
+            # Entry conditions
+            price = float(current['close'])
+            ma20 = float(current['ma20']) if not pd.isna(current['ma20']) else price
+            macd_hist = float(current['macd_hist']) if not pd.isna(current['macd_hist']) else 0
+            atr = float(current['atr14']) if not pd.isna(current['atr14']) and float(current['atr14']) > 0 else 1.0
+            rsi = float(current['rsi']) if not pd.isna(current['rsi']) else 50.0
+            money_flow_sig = float(current['money_flow_signal']) if not pd.isna(current['money_flow_signal']) else 0
+            vol_ratio = float(current['vol_ratio']) if not pd.isna(current['vol_ratio']) else 1.0
+            
+            # Normalized composite entry logic
+            normalized_macd = np.tanh(macd_hist / (atr + 1e-9))
+            normalized_rsi = (rsi - 50.0) / 50.0
+            flow_score = money_flow_sig
+            vol_strength = min(vol_ratio, 2.0) / 2.0
+            
+            entry_score = (0.4 * normalized_macd) + (0.3 * normalized_rsi) + (0.2 * flow_score) + (0.1 * vol_strength)
+            trend_ok = price > ma20
+            
+            buy_signal = entry_score > 0.25 and trend_ok
+            sell_signal = entry_score < 0.1 or not trend_ok
+            
+            # Position management
+            if position is None and buy_signal:
+                position = 'LONG'
+                entry_price = float(next_row['open'])
+                entry_date = i + 1
+            elif position == 'LONG' and sell_signal:
+                pnl = (float(next_row['open']) - entry_price) / entry_price
+                balance *= (1 + pnl)
+                trades.append(pnl)
+                trade_history.append({
+                    'entry': entry_date,
+                    'exit': i + 1,
+                    'price_entry': entry_price,
+                    'price_exit': float(next_row['open']),
+                    'pnl': pnl
+                })
+                position = None
+            
+            # Track drawdown
+            if balance > peak_balance:
+                peak_balance = balance
+            drawdown = ((peak_balance - balance) / peak_balance) * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+        
+        # Final stats
+        roi = ((balance - initial_balance) / initial_balance) * 100
+        win_rate = (len([t for t in trades if t > 0]) / len(trades) * 100) if trades else 0
+        gross_profit = sum([t for t in trades if t > 0])
+        gross_loss = abs(sum([t for t in trades if t < 0]))
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0
+        
+        return {
+            "final_balance": balance,
+            "roi": roi,
+            "total_trades": len(trades),
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown,
+            "trade_history": trade_history
+        }
+    except Exception as e:
+        st.error(f"Backtest error: {e}")
+        return None
+
 def scan_and_rank_crypto():
     """
     Dynamically fetches the Top 50 Crypto assets (by 24h volume) and ranks them by Momentum.
@@ -753,7 +923,46 @@ def scan_and_rank_crypto():
     return pd.DataFrame(stats)
 
 @st.cache_data(ttl=300)
-def scan_top_derivative_assets(timeframe='1h', top_n=30):
+def scan_top_derivative_assets(timeframe='1h', flow_timeframe=None, volume_timeframe='1h', top_n=30):
+    """
+    Scan top derivative (swap) pairs and compute momentum, z-score, inflow/outflow, and liquidity.
+    `timeframe` is used for momentum/z-score; `flow_timeframe` is used to compute inflow/outflow.
+    `volume_timeframe` is used for the short-term volume component in liquidity ratio.
+    """
+    if flow_timeframe is None:
+        flow_timeframe = timeframe
+
+    def fetch_market_caps(symbols):
+        market_caps = {}
+        try:
+            cg_list = requests.get("https://api.coingecko.com/api/v3/coins/list", timeout=10).json()
+            symbol_to_id = {}
+            for coin in cg_list:
+                symbol = coin.get('symbol', '').upper()
+                if symbol and symbol not in symbol_to_id:
+                    symbol_to_id[symbol] = coin.get('id')
+
+            ids = [symbol_to_id[symbol] for symbol in symbols if symbol in symbol_to_id]
+            if ids:
+                chunk_size = 100
+                for i in range(0, len(ids), chunk_size):
+                    batch = ids[i:i + chunk_size]
+                    params = {
+                        'vs_currency': 'usd',
+                        'ids': ','.join(batch),
+                        'order': 'market_cap_desc',
+                        'per_page': len(batch),
+                        'page': 1,
+                        'sparkline': 'false'
+                    }
+                    response = requests.get("https://api.coingecko.com/api/v3/coins/markets", params=params, timeout=10)
+                    for item in response.json():
+                        symbol = item.get('symbol', '').upper()
+                        market_caps[symbol] = item.get('market_cap', 0.0) or 0.0
+        except Exception:
+            pass
+        return market_caps
+
     exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
     try:
         tickers = exchange.fetch_tickers()
@@ -784,6 +993,16 @@ def scan_top_derivative_assets(timeframe='1h', top_n=30):
     except Exception:
         pass
 
+    # Fetch open interest data for swap pairs (map base symbol -> oi info)
+    oi_map = {}
+    try:
+        oi_data = exchange.fetch_open_interests()
+        for k, v in oi_data.items():
+            base = k.split(':')[0]
+            oi_map[base] = v
+    except Exception:
+        oi_map = {}
+
     stats = []
     progress_bar = st.progress(0)
 
@@ -799,31 +1018,185 @@ def scan_top_derivative_assets(timeframe='1h', top_n=30):
             df['close'] = pd.to_numeric(df['close'], errors='coerce')
             df['open'] = pd.to_numeric(df['open'], errors='coerce')
             df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-            
+
             df['momentum'] = df['close'].pct_change(periods=1)
             df['ma20'] = df['close'].rolling(window=20).mean()
             df['std20'] = df['close'].rolling(window=20).std()
             df['z_score'] = (df['close'] - df['ma20']) / df['std20']
+
+            # Use a separate timeframe for inflow/outflow if requested
+            inflow = outflow = net_flow = 0.0
+            money_flow_signal = 0.0
+            vol_ratio = 1.0
+
+            # --- Entry Analysis Components ---
+            # MACD histogram and ATR
+            ema12 = df['close'].ewm(span=12, adjust=False).mean()
+            ema26 = df['close'].ewm(span=26, adjust=False).mean()
+            macd = ema12 - ema26
+            signal = macd.ewm(span=9, adjust=False).mean()
+            df['macd_hist'] = macd - signal
+
+            prev_close = df['close'].shift(1)
+            tr1 = df['high'] - df['low']
+            tr2 = (df['high'] - prev_close).abs()
+            tr3 = (df['low'] - prev_close).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            df['atr14'] = tr.rolling(window=14).mean()
             
-            # Calculate inflow and outflow based on volume
-            df['is_up'] = df['close'] >= df['open']
-            inflow = df.loc[df['is_up'], 'volume'].sum()
-            outflow = df.loc[~df['is_up'], 'volume'].sum()
-            net_flow = inflow - outflow
+            # RSI (14)
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / (loss + 1e-9)
+            df['rsi'] = 100 - (100 / (1 + rs))
             
+            df['ma20'] = df['close'].rolling(window=20).mean()
+
+            try:
+                ohlcv_flow = exchange.fetch_ohlcv(full_symbol, timeframe=flow_timeframe, limit=100)
+                if ohlcv_flow:
+                    df_flow = pd.DataFrame(ohlcv_flow, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_flow['open'] = pd.to_numeric(df_flow['open'], errors='coerce')
+                    df_flow['close'] = pd.to_numeric(df_flow['close'], errors='coerce')
+                    df_flow['volume'] = pd.to_numeric(df_flow['volume'], errors='coerce')
+                    df_flow['is_up'] = df_flow['close'] >= df_flow['open']
+                    inflow = float(df_flow.loc[df_flow['is_up'], 'volume'].sum())
+                    outflow = float(df_flow.loc[~df_flow['is_up'], 'volume'].sum())
+                    net_flow = inflow - outflow
+                    total_flow = inflow + outflow
+                    if total_flow > 0:
+                        money_flow_signal = net_flow / total_flow
+
+                    avg_flow_vol = float(df_flow['volume'].rolling(window=20).mean().iloc[-1]) if len(df_flow) >= 20 else float(df_flow['volume'].mean())
+                    last_flow_vol = float(df_flow['volume'].iloc[-1])
+                    if avg_flow_vol > 0:
+                        vol_ratio = last_flow_vol / avg_flow_vol
+            except Exception:
+                inflow = outflow = net_flow = 0.0
+                money_flow_signal = 0.0
+                vol_ratio = 1.0
+
             current = df.iloc[-1]
+
+            oi_info = oi_map.get(base_symbol, {})
+            open_interest = oi_info.get('openInterestValue') or oi_info.get('openInterest') or ticker.get('openInterest', 0.0)
+
+            # Funding signal: normalize funding rate into a score -1..+1 range
+            funding_rate = funding_rates.get(base_symbol, ticker.get('fundingRate', 0.0))
+            funding_signal = np.tanh(funding_rate * 100)
+
+            # Z-score signal: positive bullish momentum, negative bearish
+            z_signal = float(current['z_score']) if np.isfinite(current['z_score']) else 0.0
+            z_score_signal = np.tanh(z_signal / 3)
+
+            # Trend Probability Score
+            tps = (0.4 * z_score_signal) + (0.3 * money_flow_signal) + (0.3 * funding_signal)
+
+            # Normalized composite entry rule
+            try:
+                macd_hist_val = float(df['macd_hist'].iloc[-1])
+                atr_val = float(df['atr14'].iloc[-1]) if not pd.isna(df['atr14'].iloc[-1]) and float(df['atr14'].iloc[-1]) > 0 else 1.0
+                rsi_val = float(df['rsi'].iloc[-1]) if not pd.isna(df['rsi'].iloc[-1]) else 50.0
+            except Exception:
+                macd_hist_val = 0.0
+                atr_val = 1.0
+                rsi_val = 50.0
+            
+            # Normalized signals: all scaled to -1..+1 or 0..1
+            normalized_macd = np.tanh(macd_hist_val / (atr_val + 1e-9))
+            normalized_rsi = (rsi_val - 50.0) / 50.0
+            flow_score = money_flow_signal  # already -1..+1
+            vol_strength = min(vol_ratio, 2.0) / 2.0  # cap at 2.0, scale to 0-1
+            
+            # Weighted composite score
+            entry_score = (0.4 * normalized_macd) + (0.3 * normalized_rsi) + (0.2 * flow_score) + (0.1 * vol_strength)
+            
+            # Trend filter
+            price = float(current['close'])
+            ma20 = float(df['ma20'].iloc[-1]) if not pd.isna(df['ma20'].iloc[-1]) else price
+            trend_ok = price > ma20
+            
+            entry_signal = 'BUY' if entry_score > 0.25 and trend_ok else ''
+
+            # Fetch volumes at different timeframes
+            vol_5m = vol_15m = vol_1h = vol_4h = 0.0
+            try:
+                for tf, vol_var in [('5m', 'vol_5m'), ('15m', 'vol_15m'), ('1h', 'vol_1h'), ('4h', 'vol_4h')]:
+                    try:
+                        vol_ohlcv = exchange.fetch_ohlcv(full_symbol, timeframe=tf, limit=1)
+                        if vol_ohlcv:
+                            vol_val = float(vol_ohlcv[-1][5])  # volume is index 5
+                            if vol_var == 'vol_5m':
+                                vol_5m = vol_val
+                            elif vol_var == 'vol_15m':
+                                vol_15m = vol_val
+                            elif vol_var == 'vol_1h':
+                                vol_1h = vol_val
+                            elif vol_var == 'vol_4h':
+                                vol_4h = vol_val
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Dedicated 15-minute RSI for quick short-term derivative momentum checks
+            rsi_15m = 50.0
+            try:
+                ohlcv_15m = exchange.fetch_ohlcv(full_symbol, timeframe='15m', limit=100)
+                if ohlcv_15m:
+                    df_15m = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                    df_15m['close'] = pd.to_numeric(df_15m['close'], errors='coerce')
+                    delta_15m = df_15m['close'].diff()
+                    gain_15m = delta_15m.where(delta_15m > 0, 0).rolling(window=14).mean()
+                    loss_15m = (-delta_15m.where(delta_15m < 0, 0)).rolling(window=14).mean()
+                    rs_15m = gain_15m / (loss_15m + 1e-9)
+                    rsi_series_15m = 100 - (100 / (1 + rs_15m))
+                    latest_rsi_15m = rsi_series_15m.iloc[-1]
+                    if not pd.isna(latest_rsi_15m):
+                        rsi_15m = float(latest_rsi_15m)
+            except Exception:
+                rsi_15m = 50.0
+
+            # Liquidity ratio uses short-term volume over market cap, times 24h volume
+            liquidity_ratio = 0.0
+            try:
+                base_sym = base_symbol.upper().replace('USDT', '')
+                market_caps = fetch_market_caps([base_sym])
+                market_cap = market_caps.get(base_sym, 0.0)
+                selected_vol = {
+                    '5m': vol_5m,
+                    '15m': vol_15m,
+                    '1h': vol_1h,
+                    '4h': vol_4h
+                }.get(volume_timeframe, vol_1h)
+                if market_cap > 0:
+                    liquidity_ratio = (selected_vol / market_cap) * float(ticker.get('quoteVolume', 0.0))
+            except Exception:
+                liquidity_ratio = 0.0
 
             return {
                 'symbol': base_symbol,
                 'price': current['close'],
                 'momentum': current['momentum'],
                 'z_score': current['z_score'],
-                'funding_rate': funding_rates.get(base_symbol, ticker.get('fundingRate', 0.0)),
-                'open_interest': ticker.get('openInterest', 0.0),
+                'funding_rate': funding_rate,
+                'funding_signal': funding_signal,
+                'money_flow_signal': money_flow_signal,
+                'tps': tps,
+                'open_interest': open_interest,
                 '24h_volume': ticker.get('quoteVolume', 0.0),
+                'vol_5m': vol_5m,
+                'vol_15m': vol_15m,
+                'vol_1h': vol_1h,
+                'vol_4h': vol_4h,
+                'rsi_15m': rsi_15m,
+                'liquidity_ratio': liquidity_ratio,
                 'inflow': inflow,
                 'outflow': outflow,
-                'net_flow': net_flow
+                'net_flow': net_flow,
+                'entry_score': entry_score,
+                'entry_signal': entry_signal
             }
         except Exception:
             return None
@@ -929,7 +1302,7 @@ def main():
     tg_chat_id = st.sidebar.text_input("Telegram Chat ID")
 
     # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Market Overview", "⚡ Top Crypto Ranking", "🔥 Derivatives Trend Scan", "🛠️ Backtest Engine", "🏛️ US Indices"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Market Overview", "⚡ Top Crypto Ranking", "🔥 Derivatives Trend Scan", "🛠️ Backtest Engine", "🏛️ US Indices", "🎯 Composite Derivative Backtest"])
 
     with tab1:
         st.subheader(f"Live Analysis: {symbol}")
@@ -1054,21 +1427,40 @@ def main():
         st.subheader("Top Derivatives Trend Scan")
         st.write("Scan the top Binance USDT perpetual contract derivatives and compare momentum with Z-score.")
         timeframe_deriv = st.selectbox("Select timeframe", ["5m", "15m", "1h", "4h"], index=2)
+        flow_timeframe = st.selectbox("Inflow/Outflow timeframe", ["5m", "15m", "1h", "4h"], index=2)
+        volume_timeframe = st.selectbox("Short-term volume timeframe", ["5m", "15m", "1h", "4h"], index=2)
 
         if st.button("Scan Top Derivatives"):
             with st.spinner("Scanning top derivative assets..."):
-                df_deriv = scan_top_derivative_assets(timeframe=timeframe_deriv, top_n=100)
+                df_deriv = scan_top_derivative_assets(timeframe=timeframe_deriv, flow_timeframe=flow_timeframe, volume_timeframe=volume_timeframe, top_n=100)
                 if df_deriv is not None and not df_deriv.empty:
                     df_deriv['momentum'] = df_deriv['momentum'].fillna(0)
                     df_deriv['z_score'] = df_deriv['z_score'].fillna(0)
+                    df_deriv['funding_rate'] = df_deriv['funding_rate'].fillna(0)
+                    df_deriv['funding_signal'] = df_deriv['funding_signal'].fillna(0)
+                    df_deriv['money_flow_signal'] = df_deriv['money_flow_signal'].fillna(0)
+                    df_deriv['tps'] = df_deriv['tps'].fillna(0)
                     df_deriv['inflow'] = df_deriv['inflow'].fillna(0)
                     df_deriv['outflow'] = df_deriv['outflow'].fillna(0)
                     df_deriv['net_flow'] = df_deriv['net_flow'].fillna(0)
+                    if 'rsi_15m' not in df_deriv.columns:
+                        df_deriv['rsi_15m'] = 50.0
+                    df_deriv['rsi_15m'] = df_deriv['rsi_15m'].fillna(50)
+                    df_deriv['entry_score'] = df_deriv.get('entry_score', 0).fillna(0)
+                    df_deriv['entry_signal'] = df_deriv.get('entry_signal', '').fillna('')
+                    st.caption("TPS = (0.4 × Z-score Signal) + (0.3 × Money Flow Signal) + (0.3 × Funding Signal)")
                     styler = df_deriv.style.format({
                         "price": "${:.2f}",
                         "momentum": "{:.2%}",
                         "z_score": "{:.2f}",
                         "funding_rate": "{:.4%}",
+                        "funding_signal": "{:.2f}",
+                        "money_flow_signal": "{:.2f}",
+                        "tps": "{:.2f}",
+                        "liquidity_ratio": "{:.6f}",
+                        "rsi_15m": "{:.2f}",
+                        "entry_score": "{:.3f}",
+                        "entry_signal": "{}",
                         "open_interest": format_large_number,
                         "24h_volume": format_large_number,
                         "inflow": format_large_number,
@@ -1076,10 +1468,21 @@ def main():
                         "net_flow": format_large_number
                     })
                     if hasattr(styler, 'map'):
-                        styler = styler.map(color_metrics, subset=['momentum', 'z_score', 'net_flow'])
+                        styler = styler.map(color_metrics, subset=['momentum', 'z_score', 'money_flow_signal', 'funding_signal', 'tps', 'liquidity_ratio', 'net_flow', 'rsi_15m', 'entry_score'])
                     else:
-                        styler = styler.applymap(color_metrics, subset=['momentum', 'z_score', 'net_flow'])
-                    st.dataframe(styler, use_container_width=True)
+                        styler = styler.applymap(color_metrics, subset=['momentum', 'z_score', 'money_flow_signal', 'funding_signal', 'tps', 'liquidity_ratio', 'net_flow', 'rsi_15m', 'entry_score'])
+                    st.dataframe(styler, width='stretch')
+                    # Top-10 upside candidates by TPS with Z-score
+                    try:
+                        top10 = df_deriv.sort_values(by='tps', ascending=False).head(10).reset_index(drop=True)
+                        if not top10.empty:
+                            st.subheader("Top 10 Upside Candidates (by TPS)")
+                            st.write("Bars = TPS (higher = more probable upside). Line = Z-score.")
+                            top10_plot = top10.set_index('symbol')
+                            st.bar_chart(top10_plot['tps'])
+                            st.line_chart(top10_plot['z_score'])
+                    except Exception as e:
+                        st.warning(f"Could not render top-10 chart: {e}")
                 else:
                     st.warning("No derivative asset data returned. Try again in a moment.")
 
@@ -1144,6 +1547,7 @@ def main():
         
         indices = ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB']
         index_stats = []
+        missing_indices = []
         
         if st.button("Refresh Indices Data"):
             with st.spinner("Fetching US Indices..."):
@@ -1151,8 +1555,18 @@ def main():
                     df_idx = fetch_and_analyze(sym, timeframe=timeframe, silent=True)
                     if df_idx is not None and not df_idx.empty:
                         current = df_idx.iloc[-1]
+                        previous = df_idx.iloc[-2] if len(df_idx) > 1 else current
+                        is_advancing = current['close'] > previous['close']
+                        is_declining = current['close'] < previous['close']
                         # Estimate daily volume (last 7 1-hour bars = 7 trading hours)
                         est_vol = df_idx['volume'].tail(7).sum()
+                        z_score = float(current['z_score']) if pd.notna(current['z_score']) else 0.0
+                        vol_ma = float(current['vol_ma']) if pd.notna(current['vol_ma']) and float(current['vol_ma']) > 0 else np.nan
+                        volume_ratio = float(current['volume']) / vol_ma if pd.notna(vol_ma) else 0.0
+                        cmf_mean = df_idx['cmf'].rolling(window=20).mean().iloc[-1]
+                        cmf_std = df_idx['cmf'].rolling(window=20).std().iloc[-1]
+                        flow_z_score = (float(current['cmf']) - float(cmf_mean)) / float(cmf_std + 1e-9) if pd.notna(cmf_mean) and pd.notna(cmf_std) else 0.0
+                        signal_score = (-z_score) + np.log1p(max(volume_ratio, 0.0)) + flow_z_score
                         
                         index_stats.append({
                             "Symbol": sym,
@@ -1160,26 +1574,57 @@ def main():
                             "Momentum": current['momentum'],
                             "RSI": current['rsi'],
                             "Trend": "Bullish 🟢" if current['close'] > current['ema_50'] else "Bearish 🔴",
+                            "Advancing": is_advancing,
+                            "Declining": is_declining,
                             "Est. Daily Volume": est_vol,
-                            "Z-Score": current['z_score']
+                            "Z-Score": z_score,
+                            "Volume Ratio": volume_ratio,
+                            "Flow Z-Score": flow_z_score,
+                            "Signal Score": signal_score
                         })
+                    else:
+                        missing_indices.append(sym)
                         
                 if index_stats:
                     df_ind = pd.DataFrame(index_stats)
-                    styler = df_ind.style.format({
+                    advancing_count = int(df_ind['Advancing'].sum())
+                    declining_count = int(df_ind['Declining'].sum())
+                    total_count = len(df_ind)
+                    breadth_ratio = advancing_count / declining_count if declining_count > 0 else None
+                    if declining_count > 0:
+                        breadth_ratio_label = f"{breadth_ratio:.2f} ({advancing_count}/{declining_count})"
+                    else:
+                        breadth_ratio_label = f"All advancing ({advancing_count}/{declining_count})" if advancing_count > 0 else f"No decliners ({advancing_count}/{declining_count})"
+                    breadth_percent = advancing_count / total_count if total_count > 0 else 0.0
+                    df_ind['Breadth Ratio'] = breadth_ratio_label
+                    df_ind['Breadth %'] = breadth_percent
+                    df_display = df_ind.drop(columns=['Advancing', 'Declining'])
+                    df_display = df_display[[
+                        "Symbol", "Breadth Ratio", "Breadth %", "Price", "Momentum", "RSI",
+                        "Trend", "Signal Score", "Volume Ratio", "Flow Z-Score",
+                        "Z-Score", "Est. Daily Volume"
+                    ]]
+                    if missing_indices:
+                        st.warning(f"Could not load: {', '.join(missing_indices)}")
+                    st.caption("Breadth Ratio = Advancing / Declining. Breadth % = Advancing / Total. Signal Score = -Z-Score + ln(1 + Volume Ratio) + Flow Z-Score")
+                    styler = df_display.style.format({
                         "Price": "${:.2f}",
                         "Momentum": "{:.2%}",
                         "RSI": "{:.2f}",
                         "Est. Daily Volume": format_large_number,
-                        "Z-Score": "{:.2f}"
+                        "Z-Score": "{:.2f}",
+                        "Volume Ratio": "{:.2f}x",
+                        "Flow Z-Score": "{:.2f}",
+                        "Signal Score": "{:.2f}",
+                        "Breadth %": "{:.0%}"
                     })
                     
                     if hasattr(styler, 'map'):
-                        styler = styler.map(color_metrics, subset=['Momentum', 'Z-Score'])
+                        styler = styler.map(color_metrics, subset=['Momentum', 'Z-Score', 'Flow Z-Score', 'Signal Score', 'Breadth %'])
                     else:
-                        styler = styler.applymap(color_metrics, subset=['Momentum', 'Z-Score'])
+                        styler = styler.applymap(color_metrics, subset=['Momentum', 'Z-Score', 'Flow Z-Score', 'Signal Score', 'Breadth %'])
                         
-                    st.dataframe(styler, use_container_width=True)
+                    st.dataframe(styler, width='stretch')
         else:
             st.info("Click 'Refresh Indices Data' to load the latest metrics for US Markets.")
             
@@ -1243,9 +1688,90 @@ def main():
                     else:
                         styler_stocks = styler_stocks.applymap(color_metrics, subset=['Momentum', 'Z-Score'])
                         
-                    st.dataframe(styler_stocks, use_container_width=True)
+                    st.dataframe(styler_stocks, width='stretch')
         else:
             st.info("Click 'Refresh Stocks Data' to load the latest metrics for Top US Stocks.")
+
+    with tab6:
+        st.subheader("🎯 Composite Derivative Backtest")
+        st.write("Backtest all composite derivative entry/exit signals: MACD, ATR, MA20, money flow, and volume ratio.")
+        
+        # Asset selection for backtest
+        deriv_symbol = st.text_input("Enter swap pair (e.g., BTC/USDT:USDT)", value="BTC/USDT:USDT")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            backtest_timeframe = st.selectbox("Backtest timeframe", ["5m", "15m", "1h", "4h"], index=2, key="bt_tf")
+        with col2:
+            backtest_flow_timeframe = st.selectbox("Flow timeframe", ["5m", "15m", "1h", "4h"], index=2, key="bt_flow_tf")
+        with col3:
+            lookback_option = st.radio("Date Range", ["Last N Days", "Custom Range"], index=0, key="bt_lookback_option")
+        
+        if lookback_option == "Last N Days":
+            lookback_days = st.slider("Lookback days", min_value=7, max_value=365, value=30, step=1)
+            start_date_param = None
+            end_date_param = None
+        else:
+            col_date1, col_date2 = st.columns(2)
+            with col_date1:
+                start_date_param = st.date_input("Start date", value=(datetime.now() - timedelta(days=30)))
+            with col_date2:
+                end_date_param = st.date_input("End date", value=datetime.now())
+            lookback_days = 30
+        
+        if st.button("Run Composite Derivative Backtest"):
+            if deriv_symbol.strip():
+                with st.spinner(f"Running backtest for {deriv_symbol}..."):
+                    # Convert dates to datetime if using custom range
+                    if lookback_option == "Custom Range":
+                        start_date_param = pd.Timestamp(start_date_param) if start_date_param else None
+                        end_date_param = pd.Timestamp(end_date_param) if end_date_param else None
+                    else:
+                        start_date_param = None
+                        end_date_param = None
+                    
+                    stats = backtest_composite_derivative(
+                        deriv_symbol, 
+                        timeframe=backtest_timeframe, 
+                        flow_timeframe=backtest_flow_timeframe,
+                        start_date=start_date_param,
+                        end_date=end_date_param,
+                        lookback_days=lookback_days
+                    )
+                    
+                    if stats:
+                        # Display metrics
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Final Balance", f"${stats['final_balance']:.2f}")
+                        m2.metric("ROI", f"{stats['roi']:.2f}%")
+                        m3.metric("Total Trades", int(stats['total_trades']))
+                        m4.metric("Win Rate", f"{stats['win_rate']:.1f}%")
+                        m5.metric("Profit Factor", f"{stats['profit_factor']:.2f}")
+                        
+                        m6, m7 = st.columns(2)
+                        m6.metric("Max Drawdown", f"{stats['max_drawdown']:.2f}%")
+                        
+                        st.divider()
+                        st.subheader("Trade History")
+                        if stats['trade_history']:
+                            trade_df = pd.DataFrame(stats['trade_history'])
+                            trade_df['pnl_pct'] = trade_df['pnl'] * 100
+                            styler = trade_df.style.format({
+                                'price_entry': '${:.2f}',
+                                'price_exit': '${:.2f}',
+                                'pnl_pct': '{:.2f}%'
+                            })
+                            if hasattr(styler, 'map'):
+                                styler = styler.map(color_metrics, subset=['pnl_pct'])
+                            else:
+                                styler = styler.applymap(color_metrics, subset=['pnl_pct'])
+                            st.dataframe(styler, width='stretch')
+                        else:
+                            st.warning("No trades generated during backtest period.")
+                    else:
+                        st.error(f"Could not run backtest for {deriv_symbol}. Check symbol format and try again.")
+            else:
+                st.warning("Please enter a valid swap pair (e.g., BTC/USDT:USDT).")
 
 if __name__ == "__main__":
     try:
