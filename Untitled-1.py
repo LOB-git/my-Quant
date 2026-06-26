@@ -12,6 +12,7 @@ matplotlib.use('Agg') # Fix for Streamlit/Matplotlib GUI errors
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 
+
 # Set page config at the top level to avoid errors and define layout
 st.set_page_config(page_title="Quant Scalper 1h", layout="wide")
 
@@ -39,7 +40,7 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
     Fetches Crypto Data (via ccxt/Binance) and calculates Multi-Strategy Factors.
     """
     try:
-        stock_index_symbols = ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM']
+        stock_index_symbols = ['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', 'AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN', 'META', 'TSLA', 'AVGO', 'LLY', 'JPM', 'GBPUSD=X', '^FTSE', 'XAUUSD=X']
         is_stock_index = symbol in stock_index_symbols
 
         # Handle Symbol Formatting (e.g., BTC-USD -> BTC/USDT for Binance)
@@ -65,13 +66,20 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
             # Choose period: intraday intervals are limited to ~60 days of history
             intraday_intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '4h']
 
+            # yfinance intraday data is limited to the last 60 days.
+            # If an intraday timeframe is selected with a start_date older than that,
+            # yfinance will fail. We adjust the start_date if necessary.
+            effective_start_date = start_date
+            if start_date and timeframe in intraday_intervals:
+                sixty_days_ago = (datetime.now() - timedelta(days=59)).strftime('%Y-%m-%d')
+                if start_date < sixty_days_ago:
+                    effective_start_date = sixty_days_ago
+
             if start_date:
                 try:
-                    df = yf.download(symbol, start=start_date, interval=yf_interval, progress=False, prepost=True)
+                    df = yf.download(symbol, start=effective_start_date, interval=yf_interval, progress=False, prepost=True)
                 except Exception:
                     df = pd.DataFrame()
-                if df.empty:
-                    df = yf.Ticker(symbol).history(start=start_date, interval=yf_interval, prepost=True)
             else:
                 period = '60d' if timeframe in intraday_intervals else '2y'
                 try:
@@ -79,7 +87,7 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
                 except Exception:
                     df = pd.DataFrame()
                 if df.empty:
-                    df = yf.Ticker(symbol).history(period=period, interval=yf_interval, prepost=True)
+                    df = yf.Ticker(symbol).history(period=period, interval=yf_interval, prepost=True) # Fallback
             
             # Flatten MultiIndex columns (yfinance v0.2+)
             if isinstance(df.columns, pd.MultiIndex):
@@ -90,7 +98,7 @@ def fetch_and_analyze(symbol='BTC/USDT', timeframe='1h', start_date=None, end_da
             df.index.name = 'date'
             
             # Strip timezone to avoid merge_asof crashes with Fear & Greed data
-            if df.index.tz is not None:
+            if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
                 df.index = df.index.tz_convert('UTC').tz_localize(None)
             # If we fetched 60m data but the user requested 4h, resample to 4H candles
             if timeframe == '4h' and not df.empty:
@@ -1263,6 +1271,67 @@ def format_large_number(x):
     except (ValueError, TypeError):
         return "$0"
 
+def plot_volatility_surface(df, symbol):
+    """
+    Computes and plots the "quantum" volatility surface and classical distribution.
+    Includes a marker for the most recent data point.
+    """
+    if df is None or 'close' not in df.columns or len(df) < 50:
+        st.warning("Not enough historical data to generate volatility surface.")
+        return None
+
+    # 1. Calculate volatility (e.g., rolling 20-period stdev of log returns)
+    df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
+    df['volatility'] = df['log_ret'].rolling(window=20).std() * np.sqrt(252) # Annualized
+    df.dropna(inplace=True)
+
+    if df['volatility'].empty:
+        st.warning("Could not compute volatility.")
+        return None
+
+    # 2. Define a "wave function" psi from the volatility series
+    vol_series = df['volatility'].values
+    vol_change = df['volatility'].diff().fillna(0).values
+    psi = vol_series + 1j * vol_change
+
+    # 3. Get probability |psi|^2 and phase Arg(psi)
+    prob_density = np.abs(psi)**2
+    phase = np.angle(psi)
+
+    # 4. Create the 2D grid for the surface plot
+    x = vol_series
+    y = vol_change
+    z = prob_density
+
+    # 5. Create the plots using Matplotlib
+    fig = plt.figure(figsize=(15, 7))
+    
+    # 3D Quantum Probability Surface
+    ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+    surf = ax1.plot_trisurf(x, y, z, cmap='viridis', antialiased=True, alpha=0.8)
+    surf.set_array(phase)
+    surf.set_clim(-np.pi, np.pi)
+    ax1.set_title(f'Quantum Volatility Surface for {symbol}\n(Color = Phase)', fontsize=12)
+    ax1.set_xlabel('Volatility', fontsize=10)
+    ax1.set_ylabel('Volatility Change (Momentum)', fontsize=10)
+    ax1.set_zlabel('Quantum Probability |ψ|²', fontsize=10)
+    fig.colorbar(surf, ax=ax1, shrink=0.5, aspect=5, label='Phase Angle (Arg(ψ))')
+
+    # Add a "You Are Here" marker for the latest point
+    ax1.scatter(x[-1], y[-1], z[-1], color='red', s=100, edgecolor='black', depthshade=True, label='Current State', zorder=10)
+    ax1.legend()
+
+    # 2D Classical Histogram
+    ax2 = fig.add_subplot(1, 2, 2)
+    ax2.hist(df['volatility'], bins=50, orientation='horizontal', density=True, color='skyblue', edgecolor='black')
+    ax2.set_title(f'Classical Volatility Distribution', fontsize=12)
+    ax2.set_xlabel('Empirical Density', fontsize=10)
+    ax2.set_ylabel('Volatility', fontsize=10)
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    
+    plt.tight_layout()
+    return fig
+
 def main():
     st.title("Quantitative Scalping Dashboard (1h) 📈")
     
@@ -1302,7 +1371,7 @@ def main():
     tg_chat_id = st.sidebar.text_input("Telegram Chat ID")
 
     # Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Market Overview", "⚡ Top Crypto Ranking", "🔥 Derivatives Trend Scan", "🛠️ Backtest Engine", "🏛️ US Indices", "🎯 Composite Derivative Backtest"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["📊 Market Overview", "⚡ Top Crypto Ranking", "🔥 Derivatives Trend Scan", "🛠️ Backtest Engine", "🏛️ US Indices", "🎯 Composite Derivative Backtest", "🌌 Volatility Quantum Analysis"])
 
     with tab1:
         st.subheader(f"Live Analysis: {symbol}")
@@ -1773,10 +1842,42 @@ def main():
             else:
                 st.warning("Please enter a valid swap pair (e.g., BTC/USDT:USDT).")
 
+    with tab7:
+        st.subheader("🌌 Volatility Quantum Analysis")
+        st.info("""
+        This tab visualizes the volatility term structure using a "quantum probability surface" as described.
+        - **Left Plot (3D Surface)**: Shows the quantum probability `|ψ|²` of the market being in a specific volatility state (x-axis) with a certain momentum (y-axis). The color represents the phase `Arg(ψ)`, indicating the direction of probability flow. Peaks are metastable states.
+        - **Right Plot (2D Histogram)**: Shows the classical, empirical distribution of volatility for comparison. It captures where the system has been, but not the complex phase relationships between states.
+        """)
+        
+        col_q1, col_q2, col_q3 = st.columns([2, 2, 1])
+        with col_q1:
+            quantum_symbol = st.selectbox("Select Index for Analysis", options=['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', '^FTSE', 'XAUUSD=X', 'GBPUSD=X'], index=0, key="quantum_sym")
+        with col_q2:
+            quantum_timeframe = st.selectbox("Select Timeframe", ["15m", "1h", "4h"], index=1, key="quantum_tf")
+        with col_q3:
+            st.write("") # Spacer
+            st.write("") # Spacer
+            auto_refresh_quantum = st.checkbox("🔄 Auto-Refresh", key="quantum_refresh")
+
+        if st.button(f"Generate Volatility Surface for {quantum_symbol}") or auto_refresh_quantum:
+            with st.spinner(f"Performing quantum analysis on {quantum_symbol}..."):
+                # Fetch the last year of data for a meaningful surface
+                df_quantum = fetch_and_analyze(quantum_symbol, timeframe=quantum_timeframe, start_date=(datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'), silent=True)
+                fig = plot_volatility_surface(df_quantum, quantum_symbol)
+                if fig:
+                    st.pyplot(fig)
+                else:
+                    st.warning(f"Could not generate volatility surface for {quantum_symbol}.")
+            
+            if auto_refresh_quantum:
+                time.sleep(301) # Wait 5 minutes
+                st.rerun()
+
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        input("Press Enter to exit...")
+     try:
+         main()
+     except Exception:
+         import traceback
+         traceback.print_exc()
+         input("Press Enter to exit...")
