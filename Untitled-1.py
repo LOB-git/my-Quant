@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg') # Fix for Streamlit/Matplotlib GUI errors
 import matplotlib.pyplot as plt
+from scipy.spatial import cKDTree
 import streamlit.components.v1 as components
 
 
@@ -1321,6 +1322,37 @@ def plot_volatility_surface(df, symbol):
     ax1.scatter(x[-1], y[-1], z[-1], color='red', s=100, edgecolor='black', depthshade=True, label='Current State', zorder=10)
     ax1.legend()
 
+    price_prediction_data = {}
+    # --- Draw Predicted Path (Probability Current) ---
+    try:
+        # 1. Create a KD-Tree for efficient nearest neighbor search in the (vol, vol_change) plane
+        all_points = np.vstack((x, y)).T
+        tree = cKDTree(all_points)
+
+        # 2. Find the 10 nearest neighbors to the current point
+        current_pos = np.array([x[-1], y[-1]])
+        distances, indices = tree.query(current_pos, k=10)
+
+        # 3. Calculate the gradient of the phase in this local neighborhood
+        # We use linear regression (least squares) to fit a plane to the phase data of the neighbors
+        neighbor_points = all_points[indices]
+        neighbor_phases = phase[indices]
+        
+        A = np.c_[neighbor_points, np.ones(len(indices))]
+        # Fit a plane: z = a*x + b*y + c. The gradient is (a, b)
+        gradient, _, _, _ = np.linalg.lstsq(A, neighbor_phases, rcond=None)
+        grad_x, grad_y = gradient[0], gradient[1]
+
+        # 4. Draw the gradient vector as an arrow on the plot
+        arrow_length_factor = 0.1 # Adjust to make arrow longer/shorter
+        ax1.quiver(x[-1], y[-1], z[-1], grad_x, grad_y, 0, length=arrow_length_factor, normalize=True, color='magenta', linewidth=3, label='Predicted Path')
+        
+        # Store data for price prediction
+        price_prediction_data['vol_grad_x'] = grad_x
+
+    except Exception as e:
+        price_prediction_data['vol_grad_x'] = 0
+
     # 2D Classical Histogram
     ax2 = fig.add_subplot(1, 2, 2)
     ax2.hist(df['volatility'], bins=50, orientation='horizontal', density=True, color='skyblue', edgecolor='black')
@@ -1330,7 +1362,7 @@ def plot_volatility_surface(df, symbol):
     ax2.grid(True, linestyle='--', alpha=0.6)
     
     plt.tight_layout()
-    return fig
+    return fig, price_prediction_data
 
 def main():
     st.title("Quantitative Scalping Dashboard (1h) 📈")
@@ -1864,9 +1896,39 @@ def main():
             with st.spinner(f"Performing quantum analysis on {quantum_symbol}..."):
                 # Fetch the last year of data for a meaningful surface
                 df_quantum = fetch_and_analyze(quantum_symbol, timeframe=quantum_timeframe, start_date=(datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'), silent=True)
-                fig = plot_volatility_surface(df_quantum, quantum_symbol)
+                fig, prediction_data = plot_volatility_surface(df_quantum, quantum_symbol)
                 if fig:
                     st.pyplot(fig)
+                    
+                    # --- Market Direction Prediction Section ---
+                    st.divider()
+                    st.subheader("🔮 Market Direction Prediction")
+                    
+                    # 1. Volatility Prediction
+                    vol_prediction = "NEUTRAL"
+                    if prediction_data.get('vol_grad_x', 0) > 0:
+                        vol_prediction = "INCREASE (Breakout/Trend Likely)"
+                    elif prediction_data.get('vol_grad_x', 0) < 0:
+                        vol_prediction = "DECREASE (Consolidation Likely)"
+
+                    # 2. Price Trend & Momentum
+                    current_data = df_quantum.iloc[-1]
+                    price_trend = "BULLISH" if current_data['close'] > current_data['ema_50'] else "BEARISH"
+                    price_momentum = "POSITIVE" if current_data['rsi'] > 50 else "NEGATIVE"
+
+                    # 3. Final Prediction Logic
+                    final_prediction = "CONSOLIDATE / CHOP"
+                    if "INCREASE" in vol_prediction:
+                        if price_trend == "BULLISH" and price_momentum == "POSITIVE":
+                            final_prediction = "MOVE UP ⬆️"
+                        elif price_trend == "BEARISH" and price_momentum == "NEGATIVE":
+                            final_prediction = "MOVE DOWN ⬇️"
+                    
+                    p_col1, p_col2, p_col3 = st.columns(3)
+                    p_col1.metric("Volatility Prediction", vol_prediction)
+                    p_col2.metric("Underlying Price Trend", price_trend)
+                    p_col3.metric("Short-Term Momentum", price_momentum)
+                    st.info(f"**Final Prediction:** The analysis suggests the market is most likely to **{final_prediction}**.")
                 else:
                     st.warning(f"Could not generate volatility surface for {quantum_symbol}.")
             
