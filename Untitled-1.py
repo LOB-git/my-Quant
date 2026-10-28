@@ -5966,7 +5966,7 @@ Each component is standardized across the displayed price bands before the weigh
         
         col_q1, col_q2, col_q3 = st.columns([2, 2, 1])
         with col_q1:
-            quantum_symbol = st.selectbox("Select Index for Analysis", options=['SPY', 'QQQ', 'DIA', '^VIX', 'DX-Y.NYB', '^FTSE', 'XAUUSD=X', 'GBPUSD=X'], index=0, key="quantum_sym")
+            quantum_symbol = st.selectbox("Select Index for Analysis", options=['SPY', 'QQQ', 'NQ=F', 'DIA', 'YM=F', 'BTC/USD', '^VIX', 'DX-Y.NYB', '^FTSE', 'XAUUSD=X', 'GBPUSD=X'], index=0, key="quantum_sym")
         with col_q2:
             quantum_timeframe = st.selectbox("Select Timeframe", ["15m", "1h", "4h"], index=1, key="quantum_tf")
         with col_q3:
