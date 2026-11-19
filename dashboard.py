@@ -8170,9 +8170,14 @@ Each component is standardized across the displayed price bands before the weigh
             st.rerun()
 
 if __name__ == "__main__":
-     try:
-         main()
-     except Exception:
-         import traceback
-         traceback.print_exc()
-         input("Press Enter to exit...")
+    if st.runtime.exists():
+        # Under `streamlit run` (this PC or Streamlit Cloud): let Streamlit show any error on the page.
+        # Catching it here hid the error, and input() waits forever on a server with no keyboard.
+        main()
+    else:
+        try:
+            main()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            input("Press Enter to exit...")
