@@ -1,0 +1,34 @@
+# Secrets: never upload. Holds the Telegram bot token once filled in.
+alert_secrets.env
+*.env
+.streamlit/secrets.toml
+
+# Python environments and caches
+.venv/
+.venv-1/
+__pycache__/
+*.pyc
+.pytest_cache/
+.yfinance-cache/
+.yfinance-cache-test/
+
+# Backups and logs
+*.bak*
+*.log
+
+# Data the dashboard and alert runner write while running (changes every hour; kept on this PC)
+.alert_runner_state.json
+watchlist_history.csv
+gex_history.csv
+session_flow_history.csv
+dexscreener_meme_history.csv
+iv_snapshots.csv
+zone_flow_tracker_log.csv
+zone_flow_tracker_state.json
+backtest_results/
+
+# Editor and tool folders
+.vscode/
+.claude/
+.agents/
+.edge-pdf-profile/
