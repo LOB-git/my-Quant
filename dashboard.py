@@ -64,6 +64,24 @@ HISTORICAL_Z_COMPONENT_SYMBOLS = [
 indices_for_qs = HISTORICAL_Z_COMPONENT_SYMBOLS.copy()
 
 
+
+# Streamlit Cloud gives the app about 1 GB of memory. Running all 13 tabs on every page load goes over it,
+# and the server kills the app ("health check ... EOF"). Online, only the tab being viewed runs.
+# On a PC every tab runs as before (alerts and scans in other tabs keep working). Set QUANT_LAZY_TABS=1/0 to force.
+LAZY_TABS = os.environ.get('QUANT_LAZY_TABS', '1' if os.path.abspath(__file__).startswith('/mount/src/') else '0') == '1'
+MAIN_TAB_OPTIONS = {'key': 'main_tab', 'on_change': 'rerun'} if LAZY_TABS else {}
+
+
+def tab_body(tab):
+    """Loop once inside the tab, or zero times when tabs are lazy and this one is not open.
+
+    Used as `for _ in tab_body(tab):` so the tab's code keeps its indentation.
+    """
+    if LAZY_TABS and not tab.open:
+        return
+    with tab:
+        yield
+
 def build_binance_gex_proxy(current_price, recent_volatility=None, strike_count=21):
     """Build a simple GEX-style proxy profile when Binance options data is unavailable."""
     if current_price is None or current_price <= 0:
@@ -3585,7 +3603,7 @@ def main():
     polygon_api_key = st.sidebar.text_input("Polygon.io API Key", type="password")
 
     # Tabs
-    tab_tracker, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs([
+    tab_tracker, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs(**MAIN_TAB_OPTIONS, tabs=[
         "🎯 Zone Flow Tracker",
         "🔥 Derivatives Trend Scan",
         "🛠️ Backtest Engine",
@@ -3601,7 +3619,7 @@ def main():
         "🕒 Session Flow Log",
     ])
 
-    with tab_tracker:
+    for _ in tab_body(tab_tracker):  # runs only the open tab online, see tab_body
         render_zone_flow_tracker(fetch_and_analyze, calculate_zone_battle_scores)
 
     if False:  # Removed: Market Overview
@@ -3720,7 +3738,7 @@ def main():
             else:
                 st.warning(f"**Verdict:** Momentum is currently **MIXED / CONSOLIDATING** ⚖️")
 
-    with tab1:
+    for _ in tab_body(tab1):  # runs only the open tab online, see tab_body
         st.subheader("Top Derivatives Trend Scan")
         st.write("Scan the top Binance USDT perpetual contract derivatives and compare momentum with Z-score.")
         timeframe_deriv = st.selectbox("Select timeframe", ["5m", "15m", "1h", "4h"], index=2)
@@ -4251,7 +4269,7 @@ def main():
                     else:
                         st.warning(f"Could not generate volatility surface for {quantum_symbol_deriv}. Not enough data available.")
             
-    with tab2:
+    for _ in tab_body(tab2):  # runs only the open tab online, see tab_body
         st.subheader(f"Strategy Backtest: {symbol}")
         if st.button("Run Backtest"):
             df = fetch_and_analyze(symbol, start_date=backtest_start.strftime('%Y-%m-%d'))
@@ -4301,7 +4319,7 @@ def main():
                         
                     st.dataframe(styler)
 
-    with tab3:
+    for _ in tab_body(tab3):  # runs only the open tab online, see tab_body
         st.subheader("🏛️ Top US Indices & VIX Overview")
         st.write("Tracking S&P 500 (SPY), Nasdaq 100 (QQQ), NAS100 futures (NQ=F), Dow Jones (DIA), Dow futures (YM=F), Volatility Index (^VIX), and US Dollar Index (DX-Y.NYB).")
         # Timeframe selector for indices/stocks (15m, 1h, 4h)
@@ -6113,7 +6131,7 @@ Each component is standardized across the displayed price bands before the weigh
             else:
                 st.warning("Please enter a valid symbol.")
 
-    with tab4:
+    for _ in tab_body(tab4):  # runs only the open tab online, see tab_body
         st.subheader("🌌 Volatility Quantum Analysis")
         st.info("""
         This tab visualizes the volatility term structure using a "quantum probability surface" as described.
@@ -6303,7 +6321,7 @@ Each component is standardized across the displayed price bands before the weigh
                 else:
                     st.error(f"Could not run backtest for {gbp_symbol}. Ensure data is available for the selected period.")
 
-    with tab5:
+    for _ in tab_body(tab5):  # runs only the open tab online, see tab_body
         st.subheader("📈 Volatility Dashboard (GEX Proxy)")
         st.info("""
         This dashboard visualizes key price levels that often act like high Gamma Exposure zones, influencing volatility.
@@ -6543,7 +6561,7 @@ Each component is standardized across the displayed price bands before the weigh
         else:
             st.warning("Run a derivative scan in the 'Derivatives Trend Scan' tab first to populate the list of available crypto assets.")
 
-    with tab6:
+    for _ in tab_body(tab6):  # runs only the open tab online, see tab_body
         st.subheader("🔥 Derivative Crypto Analysis")
         st.write("All crypto analysis in this tab uses Binance USD-M perpetuals. The ETF order flow section is US market context from Yahoo Finance.")
 
@@ -7111,7 +7129,7 @@ Each component is standardized across the displayed price bands before the weigh
         else:
             st.info("Run a derivative or ETF scan to populate the asset list for historical analysis.")
 
-    with tab10:
+    for _ in tab_body(tab10):  # runs only the open tab online, see tab_body
         def scan_top_100_binance(**options):
             return scan_top_derivative_assets(
                 binance_usdm_only=True, include_market_caps=False, **options,
@@ -7124,16 +7142,16 @@ Each component is standardized across the displayed price bands before the weigh
             format_large_number,
         )
 
-    with tab11:
+    for _ in tab_body(tab11):  # runs only the open tab online, see tab_body
         render_flow_factor_verdict(
             top_usdm_symbols,
             lambda asset, **options: fetch_and_analyze(asset, market='usdm', **options),
         )
 
-    with tab12:
+    for _ in tab_body(tab12):  # runs only the open tab online, see tab_body
         render_session_flow_log(fetch_and_analyze, top_usdm_symbols)
 
-    with tab7:
+    for _ in tab_body(tab7):  # runs only the open tab online, see tab_body
         st.subheader("🧪 SPY, QQQ & XAUUSD Flow/Momentum Z Backtest")
         st.write(
             "Backtests the Historical Z-Score logic from the US Indices tab on fixed "
@@ -7305,7 +7323,7 @@ Each component is standardized across the displayed price bands before the weigh
         else:
             st.caption("Select one asset and date range, then run its backtest.")
 
-    with tab8:
+    for _ in tab_body(tab8):  # runs only the open tab online, see tab_body
         st.subheader("NAS100 Backtest from Daily VIX Z-Score Alerts")
         st.write(
             "Backtests NAS100 futures (Yahoo Finance ticker NQ=F) using confirmed VIX "
@@ -7619,7 +7637,7 @@ Each component is standardized across the displayed price bands before the weigh
         elif st.session_state.get('nas_vix_backtest_config') is not None:
             st.info("The settings changed. Run the backtest again to refresh the results.")
 
-    with tab9:
+    for _ in tab_body(tab9):  # runs only the open tab online, see tab_body
         st.subheader("Dexscreener Meme-Coin Quant Analysis")
         st.write(
             "Applies the US Indices overview structure to decentralized-exchange pairs: "

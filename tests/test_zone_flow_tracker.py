@@ -238,7 +238,7 @@ class RunnerTests(unittest.TestCase):
     def test_tracker_is_the_first_tab(self):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / 'dashboard.py').read_text(encoding='utf-8')
-        tabs = source[source.index('= st.tabs(['):]
+        tabs = source[source.index('tabs=['):]
         self.assertIn('"🎯 Zone Flow Tracker"', tabs.splitlines()[1])
 
 

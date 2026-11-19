@@ -86,7 +86,7 @@ class ZoneBattleScoreTests(unittest.TestCase):
         from pathlib import Path
         source = (Path(__file__).resolve().parents[1] / 'dashboard.py').read_text(encoding='utf-8')
         self.assertEqual(source.count('fvg_candles=3,'), 2)
-        us_tab = source[source.index('with tab3:'):source.index('with tab6:')]
+        us_tab = source[source.index('tab_body(tab3)'):source.index('tab_body(tab6)')]
         self.assertIn('calculate_zone_battle_scores(', us_tab)
         self.assertNotIn('fvg_candles=3', us_tab)
 
