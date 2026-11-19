@@ -1,9 +1,11 @@
-streamlit
-yfinance
-pandas
-numpy
-matplotlib
-plotly
-ccxt
-requests
-scipy
+# Exact versions the dashboard is tested with (Python 3.14 on the main PC, 290 tests passing).
+# Unpinned installs can pick up a different Streamlit or pandas 3.x, which break parts of the app.
+streamlit==1.62.0
+yfinance==1.2.0
+pandas==2.3.3
+numpy==2.3.5
+matplotlib==3.10.8
+plotly==6.8.0
+ccxt==4.5.78
+requests==2.32.5
+scipy==1.17.0
