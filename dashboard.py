@@ -2913,7 +2913,7 @@ def plot_volatility_surface(df, symbol):
     """
     if df is None or 'close' not in df.columns or len(df) < 50:
         st.warning("Not enough historical data to generate volatility surface.")
-        return None
+        return None, None  # callers unpack (fig, prediction_data)
 
     # 1. Calculate volatility (e.g., rolling 20-period stdev of log returns)
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
@@ -2922,7 +2922,7 @@ def plot_volatility_surface(df, symbol):
 
     if df['volatility'].empty:
         st.warning("Could not compute volatility.")
-        return None
+        return None, None
 
     # 2. Define a "wave function" psi from the volatility series
     vol_series = df['volatility'].values

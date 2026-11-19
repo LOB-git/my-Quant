@@ -78,6 +78,8 @@ def scan_row(symbol):
 def scan(symbols, workers=6):
     with ThreadPoolExecutor(max_workers=workers) as pool:
         rows = [r for r in pool.map(scan_row, symbols) if r]
+    if not rows:  # every fetch failed (e.g. Binance blocks the host): nothing to sort
+        return pd.DataFrame()
     return pd.DataFrame(rows).sort_values('Net Flow 24h', ascending=False, kind='stable').reset_index(drop=True)
 
 
@@ -134,6 +136,12 @@ def render_real_flow(top_symbols=None):
             with st.spinner('Reading taker flow…'):
                 st.session_state['rf_scan_result'] = (pd.Timestamp.now(tz='UTC'), scan(symbols))
         result = st.session_state.get('rf_scan_result')
+        if result:
+            at, table = result
+            if table.empty:
+                st.warning('No flow data came back. Binance may be unreachable from this server '
+                           '(it blocks US hosts such as Streamlit Cloud); run the dashboard on your PC instead.')
+                result = None
         if result:
             at, table = result
             st.caption(f'Scanned {at:%Y-%m-%d %H:%M} UTC, 1h candles, sorted by net taker flow over 24h.')

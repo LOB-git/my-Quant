@@ -72,6 +72,13 @@ class QuantumStateTests(unittest.TestCase):
         self.assertEqual(data['vol_outlook'], vq.quantum_state(frame)['Volatility Outlook'])
         self.app.plt.close(fig)
 
+    def test_surface_without_data_still_returns_two_values(self):
+        # Yahoo rate-limits Streamlit Cloud; the page unpacks (fig, data) and crashed on a single None.
+        for frame in (None, pd.DataFrame(), candles(5, bars=30)):
+            fig, data = self.app.plot_volatility_surface(frame, 'TEST')
+            self.assertIsNone(fig)
+            self.assertIsNone(data)
+
     def test_too_little_history_returns_none(self):
         self.assertIsNone(vq.quantum_state(candles(1, bars=40)))
         self.assertIsNone(vq.quantum_state(None))
