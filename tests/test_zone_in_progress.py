@@ -85,6 +85,14 @@ class InProgressTests(unittest.TestCase):
         self.assertEqual(len(out), 2)
         pd.testing.assert_frame_equal(out[0], self.full)
 
+    def test_no_data_keeps_the_same_number_of_results(self):
+        # Binance blocks Streamlit Cloud (HTTP 451), so the fetch returns nothing there. The early exit
+        # returned 2 values even with include_in_progress=True, and the 3-value unpack crashed the page.
+        for empty in (None, pd.DataFrame(), self.df.head(10)):
+            results, data, progress = calculate_zone_battle_scores(empty, OBS, fvg_candles=3, include_in_progress=True)
+            self.assertTrue(results.empty and data.empty and progress.empty)
+            self.assertEqual(len(calculate_zone_battle_scores(empty, OBS, fvg_candles=3)), 2)
+
 
 class PanelTests(unittest.TestCase):
     def test_due_in(self):

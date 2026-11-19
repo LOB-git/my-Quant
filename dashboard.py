@@ -2051,7 +2051,8 @@ def calculate_zone_battle_scores(df, observation_bars=10, max_zones=30, fvg_cand
     if fvg_candles not in (2, 3):
         raise ValueError('fvg_candles must be 2 or 3')
     if df is None or df.empty or len(df) < 75:
-        return pd.DataFrame(), pd.DataFrame()
+        # Same shape as the normal return: callers with include_in_progress=True unpack three values.
+        return (pd.DataFrame(), pd.DataFrame(), pd.DataFrame()) if include_in_progress else (pd.DataFrame(), pd.DataFrame())
 
     data = df.copy().sort_index()
 
